@@ -16,25 +16,55 @@ limitations under the License.
 package linters
 
 import (
+	"context"
+	"fmt"
+
 	"github.com/cr-bot/config"
+	"github.com/google/go-github/v57/github"
+	"github.com/qiniu/x/log"
+	gitv2 "k8s.io/test-infra/prow/git/v2"
 )
 
 var (
-	lintersHandlers = map[string]LinterHandlerFunc{}
+	codeReviewHandlers = map[string]CodeReviewHandlerFunc{}
+	commentHandlers    = map[string]CommentHandlerFunc{}
 )
 
-// LinterHandlerFunc knows how to run a linter.
-type LinterHandlerFunc func(config.Linter) (map[string][]LinterOutput, error)
+// CommentHandlerFunc knows how to comment on a PR.
+type CommentHandlerFunc func(config.Linter, Agent, github.PullRequestEvent) error
 
-func RegisterLinter(name string, handler LinterHandlerFunc) {
-	lintersHandlers[name] = handler
+// RegisterCommentHandler registers a CommentHandlerFunc for the given linter name.
+func RegisterCommentHandler(name string, handler CommentHandlerFunc) {
+	commentHandlers[name] = handler
 }
 
-// LinterHandler returns a LinterHandlerFunc for the given linter name.
-func LinterHandler(name string) LinterHandlerFunc {
-	if handler, ok := lintersHandlers[name]; ok {
+// CommentHandler returns a CommentHandlerFunc for the given linter name.
+func CommentHandler(name string) CommentHandlerFunc {
+	if handler, ok := commentHandlers[name]; ok {
 		return handler
 	}
+	return nil
+}
+
+// CodeReviewHandlerFunc knows how to code review on a PR.
+type CodeReviewHandlerFunc func(config.Linter, Agent, github.PullRequestEvent) (map[string][]LinterOutput, error)
+
+// RegisterCodeReviewHandler registers a CodeReviewHandlerFunc for the given linter name.
+func RegisterCodeReviewHandler(name string, handler CodeReviewHandlerFunc) {
+	codeReviewHandlers[name] = handler
+}
+
+// LintHandlers returns a LinterHandlerFunc for the given linter name.
+func LintHandlers(name string) []interface{} {
+	var handlers []interface{}
+	if handler, ok := codeReviewHandlers[name]; ok {
+		handlers = append(handlers, handler)
+	}
+
+	if handler, ok := commentHandlers[name]; ok {
+		handlers = append(handlers, handler)
+	}
+
 	return nil
 }
 
@@ -55,4 +85,51 @@ type LinterOutput struct {
 	Column int
 	// Message is the staticcheck Message
 	Message string
+}
+
+// Agent knows necessary information from cr-bot.
+type Agent struct {
+	gc               *github.Client
+	gitClientFactory gitv2.ClientFactory
+	config           config.Config
+}
+
+func NewAgent(gc *github.Client, gitClientFactory gitv2.ClientFactory, config config.Config) Agent {
+	return Agent{
+		gc:               gc,
+		gitClientFactory: gitClientFactory,
+		config:           config,
+	}
+}
+
+func (a Agent) GitHubClient() *github.Client {
+	return a.gc
+}
+
+func (a Agent) GitClientFactory() gitv2.ClientFactory {
+	return a.gitClientFactory
+}
+
+func (a Agent) Config() config.Config {
+	return a.config
+}
+
+// CreateComment creates a comment on a PR.
+func (a Agent) CreateComment(event github.PullRequestEvent, comment string) error {
+	input := &github.PullRequestComment{
+		Body: github.String(comment),
+	}
+
+	cmt, resp, err := a.gc.PullRequests.CreateComment(context.Background(), event.GetRepo().GetOwner().GetLogin(), event.GetRepo().GetName(), event.GetNumber(), input)
+	if err != nil {
+		return err
+	}
+
+	if resp.StatusCode != 201 {
+		return fmt.Errorf("create comment failed: %v", resp.Body)
+	}
+
+	log.Debugf("create comment %s", cmt.GetHTMLURL())
+
+	return nil
 }
